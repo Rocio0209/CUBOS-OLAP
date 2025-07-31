@@ -8,8 +8,13 @@ import math
 from typing import List
 from fastapi import Query
 from fastapi.middleware.cors import CORSMiddleware
+from urllib.parse import unquote  # Importación necesaria para decodificar URLs
+from typing import List, Optional
+from pydantic import BaseModel
+from fastapi import Body
 
-
+import json
+import os
 
 
 app = FastAPI()
@@ -21,6 +26,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def obtener_valor_dim(cadena_conexion, cubo_mdx, dim, clues):
+    mdx = f"""
+    SELECT
+    NON EMPTY {{ [{dim}].[{dim}].Members }} ON ROWS,
+    {{ [Measures].DefaultMember }} ON COLUMNS
+    FROM {cubo_mdx}
+    WHERE ([CLUES].[CLUES].&[{clues}])
+    """
+    df = query_olap(cadena_conexion, mdx)
+    if not df.empty:
+        valor = str(df.iloc[0, 0]) if pd.notna(df.iloc[0, 0]) else None
+        if valor:
+            return valor.split("].[")[-1].replace("]", "").strip()
+    return None
 
 
 def crear_conexion(catalogo: str = None):
@@ -242,501 +262,6 @@ def miembros_jerarquia(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.get("/variables_por_clues")
-def variables_por_clues(
-    catalogo: str,
-    cubo: str,
-    clues: str
-):
-    try:
-        mdx = f"""
-        SELECT 
-            [Variable].[Variable].MEMBERS ON ROWS,
-            {{ [Measures].DefaultMember }} ON COLUMNS
-        FROM [{cubo}]
-        WHERE ([CLUES].[CLUES].&[{clues}])
-        """
-
-        cadena_conexion = (
-            "Provider=MSOLAP.8;"
-            "Data Source=pwidgis03.salud.gob.mx;"
-            "User ID=SALUD\\DGIS15;"
-            "Password=Temp123!;"
-            f"Initial Catalog={catalogo};"
-        )
-
-        df = query_olap(cadena_conexion, mdx)
-        df = df.rename(columns=lambda x: x.strip())
-
-        variables = [{"nombre": row[0]} for _, row in df.iterrows()]
-        return {
-            "clues": clues,
-            "variables": variables
-        }
-
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-
-@app.post("/variables_por_clues_multiple")
-def variables_por_clues_multiple(
-    catalogo: str = Body(...),
-    cubo: str = Body(...),
-    clues: str = Body(...),
-    variables: List[str] = Body(...)
-):
-    try:
-        print(f"Recibido: catalogo={catalogo}, cubo={cubo}, clues={clues}, variables={variables}")
-        
-       
-        cadena_conexion = (
-            "Provider=MSOLAP.8;"
-            "Data Source=pwidgis03.salud.gob.mx;"
-            "User ID=SALUD\\DGIS15;"
-            "Password=Temp123!;"
-            f"Initial Catalog={catalogo};"
-        )
-
-        mdx_check = f"""
-        SELECT 
-        {{[Measures].DefaultMember}} ON COLUMNS
-        FROM [{cubo}]
-        WHERE ([CLUES].[CLUES].&[{clues}])
-        """
-        
-        try:
-          
-            check_df = query_olap(cadena_conexion, mdx_check)
-            print("CLUES check result:", check_df.to_dict())
-        except Exception as e:
-            print(f"CLUES check error: {str(e)}")
-          
-            return JSONResponse(
-                status_code=400, 
-                content={"error": f"La CLUES '{clues}' no existe o no es válida."}
-            )
-
-    
-        mdx = f"""
-        SELECT 
-        {{[Measures].DefaultMember}} ON COLUMNS,
-        {{ {", ".join(f"[Variable].[Variable].[{v}]" for v in variables)} }} ON ROWS
-        FROM [{cubo}]
-        WHERE ([CLUES].[CLUES].[{clues}])
-        """
-        
-        print("MDX generado:", mdx)
-        
-        df = query_olap(cadena_conexion, mdx)
-        print("Datos crudos:", df.to_dict())
-        
-       
-        if df.empty:
-            print("DataFrame está vacío - no hay resultados")
-            return {"clues": clues, "resultados": [], "message": "No se encontraron datos para esta consulta"}
-        
-        resultados = []
-        for _, row in df.iterrows():
-          
-            nombre_variable = row[0]
-    
-            if '.[' in nombre_variable:
-                nombre_variable = nombre_variable.split('.[')[-1].rstrip(']')
-            
-            resultados.append({
-                "variable": nombre_variable,
-                "valor": sanitize_result(row[1]) if len(row) > 1 else None
-            })
-        
-        print("Resultados procesados:", resultados)
-        return {"clues": clues, "resultados": resultados}
-
-    except Exception as e:
-        print("Error en API:", str(e))
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-@app.get("/variables_pacientes_por_clues")
-def variables_pacientes_por_clues(catalogo: str, cubo: str, clues: str):
-    try:
-        cubo_mdx = f'"{cubo}"' if " " in cubo else f"[{cubo}]"
-
-        cadena_conexion = (
-            "Provider=MSOLAP.8;"
-            "Data Source=pwidgis03.salud.gob.mx;"
-            "User ID=SALUD\\DGIS15;"
-            "Password=Temp123!;"
-            f"Initial Catalog={catalogo};"
-        )
-
-        mdx_check = f"""
-        SELECT 
-        {{[Measures].DefaultMember}} ON COLUMNS
-        FROM {cubo_mdx}
-        WHERE ([CLUES].[CLUES].&[{clues}])
-        """
-
-        try:
-            check_df = query_olap(cadena_conexion, mdx_check)
-        except Exception as e:
-            return JSONResponse(
-                status_code=400,
-                content={"error": f"La CLUES '{clues}' no existe o no es válida en el catálogo/cubo especificado."}
-            )
-
-        mdx = f"""
-        SELECT 
-        {{[Measures].[Total]}} ON COLUMNS,
-        {{[Variable].[Variable].MEMBERS}} ON ROWS
-        FROM {cubo_mdx}
-        WHERE ([CLUES].[CLUES].&[{clues}])
-        """
-
-        df = query_olap(cadena_conexion, mdx)
-
-        if df is None or not hasattr(df, 'empty') or df.empty:
-            return {"clues": clues, "variables": [], "message": "No se encontraron datos o el cubo no respondió correctamente"}
-
-        variables = []
-        for _, row in df.iterrows():
-            if row[0] is None:
-                continue
-
-            nombre_variable = row[0]
-
-            if '.[' in nombre_variable:
-                nombre_variable = nombre_variable.split('.[')[-1].rstrip(']')
-
-            valor = sanitize_result(row[1]) if len(row) > 1 else None
-            if valor is not None and isinstance(valor, (int, float)) and valor > 0:
-                variables.append({
-                    "variable": nombre_variable,
-                    "total_pacientes": valor
-                })
-
-        return {
-            "clues": clues,
-            "catalogo": catalogo,
-            "cubo": cubo,
-            "total_variables": len(variables),
-            "variables": variables
-        }
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-@app.post("/total_pacientes_multiple")
-def total_pacientes_multiple(
-    catalogo: str = Body(...),
-    cubo: str = Body(...),
-    clues_list: List[str] = Body(...),
-    variables: List[str] = Body(default=None, description="Lista de variables a consultar (opcional)")
-):
-    if variables is None:
-        variables = []
-
-    try:
-        print(f"Recibido: catalogo={catalogo}, cubo={cubo}, clues_list={clues_list}, variables={variables}")
-
-        cubo_mdx = f'"{cubo}"' if " " in cubo else f"[{cubo}]"
-
-        cadena_conexion = (
-            "Provider=MSOLAP.8;"
-            "Data Source=pwidgis03.salud.gob.mx;"
-            "User ID=SALUD\\DGIS15;"
-            "Password=Temp123!;"
-            f"Initial Catalog={catalogo};"
-        )
-
-        resultados_por_clues = []
-
-        for clues in clues_list:
-            mdx_check = f"""
-            SELECT 
-            {{[Measures].DefaultMember}} ON COLUMNS
-            FROM {cubo_mdx}
-            WHERE ([CLUES].[CLUES].&[{clues}])
-            """
-
-            try:
-                check_df = query_olap(cadena_conexion, mdx_check)
-                print(f"CLUES {clues} check result:", check_df.to_dict() if check_df is not None else "None")
-            except Exception as e:
-                print(f"CLUES {clues} check error: {str(e)}")
-                resultados_por_clues.append({
-                    "clues": clues,
-                    "estado": "error",
-                    "mensaje": f"La CLUES '{clues}' no existe o no es válida.",
-                    "resultados": []
-                })
-                continue
-
-            if not variables:
-                mdx = f"""
-                SELECT 
-                {{[Measures].[Total]}} ON COLUMNS,
-                {{[Variable].[Variable].MEMBERS}} ON ROWS
-                FROM {cubo_mdx}
-                WHERE ([CLUES].[CLUES].&[{clues}])
-                """
-            else:
-                mdx = f"""
-                SELECT 
-                {{[Measures].[Total]}} ON COLUMNS,
-                {{ {", ".join(f"[Variable].[Variable].[{v}]" for v in variables)} }} ON ROWS
-                FROM {cubo_mdx}
-                WHERE ([CLUES].[CLUES].&[{clues}])
-                """
-
-            print(f"MDX generado para CLUES {clues}:", mdx)
-
-            try:
-                df = query_olap(cadena_conexion, mdx)
-                if df is None or not hasattr(df, 'empty') or df.empty:
-                    print(f"DataFrame está vacío para CLUES {clues} - no hay resultados")
-                    resultados_por_clues.append({
-                        "clues": clues,
-                        "estado": "sin_datos",
-                        "mensaje": "No se encontraron datos para esta consulta",
-                        "resultados": []
-                    })
-                    continue
-
-                resultados = []
-                for _, row in df.iterrows():
-                    if row[0] is None:
-                        continue
-                    nombre_variable = row[0]
-                    if '.[' in nombre_variable:
-                        nombre_variable = nombre_variable.split('.[')[-1].rstrip(']')
-                    valor = sanitize_result(row[1]) if len(row) > 1 else None
-                    if valor is not None and isinstance(valor, (int, float)):
-                        resultados.append({
-                            "variable": nombre_variable,
-                            "total_pacientes": valor
-                        })
-
-                print(f"Resultados procesados para CLUES {clues}:", resultados)
-                resultados_por_clues.append({
-                    "clues": clues,
-                    "estado": "exito",
-                    "total_variables": len(resultados),
-                    "resultados": resultados
-                })
-
-            except Exception as e:
-                print(f"Error en consulta para CLUES {clues}:", str(e))
-                resultados_por_clues.append({
-                    "clues": clues,
-                    "estado": "error",
-                    "mensaje": f"Error al consultar datos: {str(e)}",
-                    "resultados": []
-                })
-
-        return {
-            "catalogo": catalogo,
-            "cubo": cubo,
-            "total_clues_consultadas": len(clues_list),
-            "resultados": resultados_por_clues
-        }
-
-    except Exception as e:
-        print("Error general en API:", str(e))
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-@app.post("/total_pacientes_multiple_detallado")
-def total_pacientes_multiple_detallado(
-    catalogo: str = Body(...),
-    cubo: str = Body(...),
-    clues_list: List[str] = Body(...),
-    variables: List[str] = Body(default=None)
-):
-    if variables is None:
-        variables = []
-
-    try:
-        cubo_mdx = f'"{cubo}"' if " " in cubo else f"[{cubo}]"
-
-        cadena_conexion = (
-            "Provider=MSOLAP.8;"
-            "Data Source=pwidgis03.salud.gob.mx;"
-            "User ID=SALUD\\DGIS15;"
-            "Password=Temp123!;"
-            f"Initial Catalog={catalogo};"
-        )
-
-        resultados_por_clues = []
-
-        for clues in clues_list:
-            try:
-              
-                geo_data = {
-                    "entidad": None,
-                    "jurisdiccion": None,
-                    "municipio": None,
-                    "unidad_medica": None
-                }
-
-               
-                try:
-                    mdx_geo = f"""
-                    SELECT
-                    NON EMPTY {{
-                        [Entidad].[Entidad].CurrentMember,
-                        [Jurisdicción].[Jurisdicción].CurrentMember,
-                        [Municipio].[Municipio].CurrentMember,
-                        [Unidad Médica].[Nombre de la Unidad Médica].CurrentMember
-                    }} ON ROWS,
-                    {{ [Measures].DefaultMember }} ON COLUMNS
-                    FROM {cubo_mdx}
-                    WHERE ([CLUES].[CLUES].&[{clues}])
-                    """
-                    
-                    df_geo = query_olap(cadena_conexion, mdx_geo)
-                    if not df_geo.empty:
-                        for i, row in df_geo.iterrows():
-                            cell_value = str(row[0]) if pd.notna(row[0]) else None
-                            if cell_value:
-                                if "[Entidad].[Entidad]" in cell_value:
-                                    geo_data["entidad"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                elif "[Jurisdicción].[Jurisdicción]" in cell_value:
-                                    geo_data["jurisdiccion"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                elif "[Municipio].[Municipio]" in cell_value:
-                                    geo_data["municipio"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                elif "[Unidad Médica].[Nombre de la Unidad Médica]" in cell_value:
-                                    geo_data["unidad_medica"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                except Exception as geo_error:
-                    print(f"Error en consulta geográfica combinada: {str(geo_error)}")
-                   
-
-                    
-                    um_names = [
-                        "[Unidad Médica].[Nombre de la Unidad Médica]",
-                        "[Unidad Médica].[Unidad Médica]",
-                        "[Unidad Médica].[Nombre Unidad]",
-                        "[Unidad Médica].[Nombre]"
-                    ]
-                    
-                    for um_name in um_names:
-                        try:
-                            mdx_um = f"""
-                            SELECT
-                            NON EMPTY {{ {um_name}.Members }} ON ROWS,
-                            {{ [Measures].DefaultMember }} ON COLUMNS
-                            FROM {cubo_mdx}
-                            WHERE ([CLUES].[CLUES].&[{clues}])
-                            """
-                            df_um = query_olap(cadena_conexion, mdx_um)
-                            if not df_um.empty:
-                                cell_value = str(df_um.iloc[0, 0]) if pd.notna(df_um.iloc[0, 0]) else None
-                                if cell_value:
-                                    geo_data["unidad_medica"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                    break
-                        except Exception:
-                            continue
-
-                  
-                    for dim in ["Entidad", "Jurisdicción", "Municipio"]:
-                        try:
-                            mdx_dim = f"""
-                            SELECT
-                            NON EMPTY {{ [{dim}].[{dim}].Members }} ON ROWS,
-                            {{ [Measures].DefaultMember }} ON COLUMNS
-                            FROM {cubo_mdx}
-                            WHERE ([CLUES].[CLUES].&[{clues}])
-                            """
-                            df_dim = query_olap(cadena_conexion, mdx_dim)
-                            if not df_dim.empty:
-                                cell_value = str(df_dim.iloc[0, 0]) if pd.notna(df_dim.iloc[0, 0]) else None
-                                if cell_value:
-                                    key = dim.lower().replace("ó", "o")
-                                    geo_data[key] = cell_value.split("].[")[-1].replace("]", "").strip()
-                        except Exception:
-                            continue
-
-             
-                resultados = []
-                if variables:
-                    for variable in variables:
-                        try:
-                            mdx_var = f"""
-                            SELECT 
-                                {{ [Measures].[Total] }} ON COLUMNS,
-                                NON EMPTY {{ [Variable].[Variable].[{variable}] }} ON ROWS
-                            FROM {cubo_mdx}
-                            WHERE ([CLUES].[CLUES].&[{clues}])
-                            """
-                            df_var = query_olap(cadena_conexion, mdx_var)
-                            
-                            if not df_var.empty and len(df_var.columns) >= 2:
-                                valor = df_var.iloc[0, 1]
-                                if pd.isna(valor):
-                                    valor = None
-                                elif hasattr(valor, 'item'):
-                                    valor = valor.item()
-                                
-                                if valor is not None:
-                                    resultados.append({
-                                        "variable": variable,
-                                        "total_pacientes": int(valor) if valor is not None else None
-                                    })
-                        except Exception as var_error:
-                            print(f"Error al consultar variable {variable}: {str(var_error)}")
-                            continue
-
-              
-                response_item = {
-                    "clues": clues,
-                    "estado": "exito" if resultados or not variables else "sin_datos_variables",
-                    "unidad": geo_data,
-                    "total_variables": len(resultados),
-                    "resultados": resultados
-                }
-
-                resultados_por_clues.append(response_item)
-
-            except Exception as e:
-                print(f"Error procesando CLUES {clues}: {str(e)}")
-                resultados_por_clues.append({
-                    "clues": clues,
-                    "estado": "error",
-                    "mensaje": str(e),
-                    "unidad": {
-                        "entidad": None,
-                        "jurisdiccion": None,
-                        "municipio": None,
-                        "unidad_medica": None
-                    },
-                    "total_variables": 0,
-                    "resultados": []
-                })
-
-        return {
-            "catalogo": catalogo,
-            "cubo": cubo,
-            "total_clues_consultadas": len(clues_list),
-            "resultados": resultados_por_clues
-        }
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Error interno del servidor: {str(e)}"}
-        )
-
-
-
-# ------------------------------------------------------------------------------- PRUEBAS
 
 # GET PARA OBTENER DATOS DE BIOLÓGICOS POR CLUES, DIVIDE LAS VARIABLES EN DOS GRUPOS
 
@@ -962,6 +487,8 @@ def biologicos_por_clues(catalogo: str, cubo: str, clues: str):
 
 # PARA CONSULTA DE BIOLOGICOS POR MULTIPLES CLUES 
 
+#biologicos_por_multiples_clues
+# 
 
 @app.post("/biologicos_por_multiples_clues")
 def biologicos_por_multiples_clues(
@@ -970,7 +497,13 @@ def biologicos_por_multiples_clues(
     clues_list: List[str] = Body(...)
 ):
     try:
-        # Configuración inicial
+        # 1. Cargar el JSON de unidades médicas al inicio
+        ruta_archivo = os.path.join(os.path.dirname(__file__), "../database/seeders/json/unidades.json")
+        with open(ruta_archivo, "r", encoding="utf-8") as f:
+            unidades_medicas = json.load(f)
+        unidades_dict = {um["clues"]: um for um in unidades_medicas}  # Diccionario para búsqueda rápida
+
+        # 2. Configuración inicial del cubo OLAP
         cubo_mdx = f'[{cubo}]'
         cadena_conexion = (
             "Provider=MSOLAP.8;"
@@ -985,7 +518,7 @@ def biologicos_por_multiples_clues(
         
         for clues in clues_list:
             try:
-                # 1. Verificar que la CLUES existe
+                # 3. Verificar que la CLUES existe en OLAP
                 mdx_check = f"""
                 SELECT {{[Measures].DefaultMember}} ON COLUMNS
                 FROM {cubo_mdx}
@@ -996,25 +529,34 @@ def biologicos_por_multiples_clues(
                     clues_no_encontradas.append(clues)
                     continue
 
-                # 2. Obtener datos geográficos de la unidad médica
+                # 4. Obtener datos geográficos (incluyendo nombre desde JSON)
                 def obtener_datos_geograficos(clues: str) -> dict:
-                    """Obtiene los datos geográficos de la unidad médica"""
+                    """Obtiene los datos geográficos combinando OLAP y JSON local"""
                     geo_data = {
                         "entidad": None,
                         "jurisdiccion": None,
                         "municipio": None,
-                        "unidad_medica": None
+                        "nombre": None  # Nuevo campo para el nombre desde JSON
                     }
 
-                    # Primero intentamos con la consulta combinada
+                    # A. Obtener nombre desde JSON local
+                    unidad_info = unidades_dict.get(clues)
+                    if unidad_info:
+                        geo_data["nombre"] = unidad_info.get("nombre", None)
+
+                    # Consultas individuales por dimensión para evitar error MDX
+                    geo_data["entidad"] = obtener_valor_dim(cadena_conexion, cubo_mdx, "Entidad", clues)
+                    geo_data["jurisdiccion"] = obtener_valor_dim(cadena_conexion, cubo_mdx, "Jurisdicción", clues)
+                    geo_data["municipio"] = obtener_valor_dim(cadena_conexion, cubo_mdx, "Municipio", clues)
+
+                    # B. Obtener datos geográficos desde OLAP
                     try:
                         mdx_geo = f"""
                         SELECT
                         NON EMPTY {{
                             [Entidad].[Entidad].CurrentMember,
                             [Jurisdicción].[Jurisdicción].CurrentMember,
-                            [Municipio].[Municipio].CurrentMember,
-                            [Unidad Médica].[Nombre de la Unidad Médica].CurrentMember
+                            [Municipio].[Municipio].CurrentMember
                         }} ON ROWS,
                         {{ [Measures].DefaultMember }} ON COLUMNS
                         FROM {cubo_mdx}
@@ -1032,66 +574,14 @@ def biologicos_por_multiples_clues(
                                         geo_data["jurisdiccion"] = cell_value.split("].[")[-1].replace("]", "").strip()
                                     elif "[Municipio].[Municipio]" in cell_value:
                                         geo_data["municipio"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                    elif "[Unidad Médica].[Nombre de la Unidad Médica]" in cell_value:
-                                        geo_data["unidad_medica"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                            return geo_data
                     except Exception as geo_error:
-                        print(f"Error en consulta geográfica combinada para CLUES {clues}: {str(geo_error)}")
-
-                    # Si falla, intentamos con consultas individuales
-                    try:
-                        # Intentamos diferentes nombres para la unidad médica
-                        um_names = [
-                            "[Unidad Médica].[Nombre de la Unidad Médica]",
-                            "[Unidad Médica].[Unidad Médica]",
-                            "[Unidad Médica].[Nombre Unidad]",
-                            "[Unidad Médica].[Nombre]"
-                        ]
-                        
-                        for um_name in um_names:
-                            try:
-                                mdx_um = f"""
-                                SELECT
-                                NON EMPTY {{ {um_name}.Members }} ON ROWS,
-                                {{ [Measures].DefaultMember }} ON COLUMNS
-                                FROM {cubo_mdx}
-                                WHERE ([CLUES].[CLUES].&[{clues}])
-                                """
-                                df_um = query_olap(cadena_conexion, mdx_um)
-                                if not df_um.empty:
-                                    cell_value = str(df_um.iloc[0, 0]) if pd.notna(df_um.iloc[0, 0]) else None
-                                    if cell_value:
-                                        geo_data["unidad_medica"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                        break
-                            except Exception:
-                                continue
-
-                        # Consultamos las otras dimensiones por separado
-                        for dim in ["Entidad", "Jurisdicción", "Municipio"]:
-                            try:
-                                mdx_dim = f"""
-                                SELECT
-                                NON EMPTY {{ [{dim}].[{dim}].Members }} ON ROWS,
-                                {{ [Measures].DefaultMember }} ON COLUMNS
-                                FROM {cubo_mdx}
-                                WHERE ([CLUES].[CLUES].&[{clues}])
-                                """
-                                df_dim = query_olap(cadena_conexion, mdx_dim)
-                                if not df_dim.empty:
-                                    cell_value = str(df_dim.iloc[0, 0]) if pd.notna(df_dim.iloc[0, 0]) else None
-                                    if cell_value:
-                                        key = dim.lower().replace("ó", "o")
-                                        geo_data[key] = cell_value.split("].[")[-1].replace("]", "").strip()
-                            except Exception:
-                                continue
-                    except Exception as e:
-                        print(f"Error en consultas individuales para CLUES {clues}: {str(e)}")
+                        print(f"Error en consulta geográfica para CLUES {clues}: {str(geo_error)}")
 
                     return geo_data
 
                 geo_data = obtener_datos_geograficos(clues)
 
-                # 3. Obtener datos de biológicos
+                # 5. Obtener datos de biológicos (código original sin cambios)
                 def obtener_datos_biologicos(clues: str) -> list:
                     """Obtiene los datos de aplicación de biológicos"""
                     biologicos_data = []
@@ -1153,10 +643,10 @@ def biologicos_por_multiples_clues(
 
                 datos_biologicos = obtener_datos_biologicos(clues)
 
-                # Construir respuesta para esta CLUES
+                # 6. Construir respuesta incluyendo el nombre desde JSON
                 resultado_clues = {
                     "clues": clues,
-                    "unidad": geo_data,
+                    "unidad": geo_data,  # Ahora incluye "nombre"
                     "biologicos": datos_biologicos
                 }
 
@@ -1166,7 +656,14 @@ def biologicos_por_multiples_clues(
                 print(f"Error procesando CLUES {clues}: {str(e)}")
                 resultados.append({
                     "clues": clues,
-                    "error": str(e)
+                    "error": str(e),
+                    "unidad": {  # Estructura mínima en caso de error
+                        "nombre": None,
+                        "entidad": None,
+                        "jurisdiccion": None,
+                        "municipio": None
+                    },
+                    "biologicos": []
                 })
 
         # Construir respuesta final
@@ -1199,268 +696,3 @@ def biologicos_por_multiples_clues(
                 "clues_solicitadas": clues_list
             }
         )
-
-
-
-
-
-@app.post("/biologicos_por_clues_y_variables")
-def biologicos_por_clues_y_variables(
-    catalogo: str = Body(...),
-    cubo: str = Body(...),
-    clues_list: List[str] = Body(...),
-    variables_list: List[str] = Body(...)
-):
-    try:
-        # Configuración inicial
-        cubo_mdx = f'[{cubo}]'
-        cadena_conexion = (
-            "Provider=MSOLAP.8;"
-            "Data Source=pwidgis03.salud.gob.mx;"
-            "User ID=SALUD\\DGIS15;"
-            "Password=Temp123!;"
-            f"Initial Catalog={catalogo};"
-        )
-
-        # Convertir variables a mayúsculas para comparación sin distinción de mayúsculas
-        variables_solicitadas = [v.upper() for v in variables_list]
-        
-        resultados = []
-        clues_no_encontradas = []
-        
-        for clues in clues_list:
-            try:
-                # 1. Verificar que la CLUES existe
-                mdx_check = f"""
-                SELECT {{[Measures].DefaultMember}} ON COLUMNS
-                FROM {cubo_mdx}
-                WHERE ([CLUES].[CLUES].&[{clues}])
-                """
-                check_df = query_olap(cadena_conexion, mdx_check)
-                if check_df.empty:
-                    clues_no_encontradas.append(clues)
-                    continue
-
-                # 2. Obtener datos geográficos de la unidad médica
-                def obtener_datos_geograficos(clues: str) -> dict:
-                    """Obtiene los datos geográficos de la unidad médica"""
-                    geo_data = {
-                        "entidad": None,
-                        "jurisdiccion": None,
-                        "municipio": None,
-                        "unidad_medica": None
-                    }
-
-                    # Primero intentamos con la consulta combinada
-                    try:
-                        mdx_geo = f"""
-                        SELECT
-                        NON EMPTY {{
-                            [Entidad].[Entidad].CurrentMember,
-                            [Jurisdicción].[Jurisdicción].CurrentMember,
-                            [Municipio].[Municipio].CurrentMember,
-                            [Unidad Médica].[Nombre de la Unidad Médica].CurrentMember
-                        }} ON ROWS,
-                        {{ [Measures].DefaultMember }} ON COLUMNS
-                        FROM {cubo_mdx}
-                        WHERE ([CLUES].[CLUES].&[{clues}])
-                        """
-                        
-                        df_geo = query_olap(cadena_conexion, mdx_geo)
-                        if not df_geo.empty:
-                            for i, row in df_geo.iterrows():
-                                cell_value = str(row[0]) if pd.notna(row[0]) else None
-                                if cell_value:
-                                    if "[Entidad].[Entidad]" in cell_value:
-                                        geo_data["entidad"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                    elif "[Jurisdicción].[Jurisdicción]" in cell_value:
-                                        geo_data["jurisdiccion"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                    elif "[Municipio].[Municipio]" in cell_value:
-                                        geo_data["municipio"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                    elif "[Unidad Médica].[Nombre de la Unidad Médica]" in cell_value:
-                                        geo_data["unidad_medica"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                            return geo_data
-                    except Exception as geo_error:
-                        print(f"Error en consulta geográfica combinada para CLUES {clues}: {str(geo_error)}")
-
-                    # Si falla, intentamos con consultas individuales
-                    try:
-                        # Intentamos diferentes nombres para la unidad médica
-                        um_names = [
-                            "[Unidad Médica].[Nombre de la Unidad Médica]",
-                            "[Unidad Médica].[Unidad Médica]",
-                            "[Unidad Médica].[Nombre Unidad]",
-                            "[Unidad Médica].[Nombre]"
-                        ]
-                        
-                        for um_name in um_names:
-                            try:
-                                mdx_um = f"""
-                                SELECT
-                                NON EMPTY {{ {um_name}.Members }} ON ROWS,
-                                {{ [Measures].DefaultMember }} ON COLUMNS
-                                FROM {cubo_mdx}
-                                WHERE ([CLUES].[CLUES].&[{clues}])
-                                """
-                                df_um = query_olap(cadena_conexion, mdx_um)
-                                if not df_um.empty:
-                                    cell_value = str(df_um.iloc[0, 0]) if pd.notna(df_um.iloc[0, 0]) else None
-                                    if cell_value:
-                                        geo_data["unidad_medica"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                        break
-                            except Exception:
-                                continue
-
-                        # Consultamos las otras dimensiones por separado
-                        for dim in ["Entidad", "Jurisdicción", "Municipio"]:
-                            try:
-                                mdx_dim = f"""
-                                SELECT
-                                NON EMPTY {{ [{dim}].[{dim}].Members }} ON ROWS,
-                                {{ [Measures].DefaultMember }} ON COLUMNS
-                                FROM {cubo_mdx}
-                                WHERE ([CLUES].[CLUES].&[{clues}])
-                                """
-                                df_dim = query_olap(cadena_conexion, mdx_dim)
-                                if not df_dim.empty:
-                                    cell_value = str(df_dim.iloc[0, 0]) if pd.notna(df_dim.iloc[0, 0]) else None
-                                    if cell_value:
-                                        key = dim.lower().replace("ó", "o")
-                                        geo_data[key] = cell_value.split("].[")[-1].replace("]", "").strip()
-                            except Exception:
-                                continue
-                    except Exception as e:
-                        print(f"Error en consultas individuales para CLUES {clues}: {str(e)}")
-
-                    return geo_data
-
-                geo_data = obtener_datos_geograficos(clues)
-
-                # 3. Obtener datos de biológicos (solo las variables solicitadas)
-                def obtener_datos_biologicos(clues: str) -> list:
-                    """Obtiene los datos de aplicación de biológicos, filtrando por variables solicitadas"""
-                    biologicos_data = []
-                    
-                    try:
-                        # Obtener todos los apartados que contienen 'BIOLÓGICOS'
-                        mdx_apartados = f"""
-                        SELECT
-                        NON EMPTY {{ [Apartado].[Apartado].MEMBERS }} ON ROWS,
-                        {{ [Measures].DefaultMember }} ON COLUMNS
-                        FROM {cubo_mdx}
-                        WHERE ([CLUES].[CLUES].&[{clues}])
-                        """
-                        
-                        df_apartados = query_olap(cadena_conexion, mdx_apartados)
-                        
-                        apartados_biologicos = []
-                        for _, row in df_apartados.iterrows():
-                            if row[0] and 'BIOLÓGICOS' in row[0].upper():
-                                apartado = row[0].split('.')[-1].replace('[', '').replace(']', '')
-                                apartados_biologicos.append(apartado)
-                        
-                        # Para cada apartado de biológicos, obtener sus variables y filtrar
-                        for apartado in apartados_biologicos:
-                            mdx_variables = f"""
-                            SELECT
-                            NON EMPTY {{ [Variable].[Variable].MEMBERS }} ON ROWS,
-                            {{ [Measures].[Total] }} ON COLUMNS
-                            FROM {cubo_mdx}
-                            WHERE ([Apartado].[Apartado].&[{apartado}], [CLUES].[CLUES].&[{clues}])
-                            """
-                            
-                            df_variables = query_olap(cadena_conexion, mdx_variables)
-                            
-                            variables_con_valores = []
-                            for _, row in df_variables.iterrows():
-                                if len(row) >= 2 and row[0] and pd.notna(row[1]):
-                                    nombre_variable = row[0].split('.')[-1].replace('[', '').replace(']', '')
-                                    
-                                    # Filtrar solo las variables solicitadas
-                                    if nombre_variable.upper() in variables_solicitadas:
-                                        try:
-                                            valor = int(float(row[1])) if pd.notna(row[1]) else None
-                                        except:
-                                            valor = None
-                                        
-                                        if valor is not None:
-                                            variables_con_valores.append({
-                                                "variable": nombre_variable,
-                                                "total": valor
-                                            })
-
-                            if variables_con_valores:
-                                biologicos_data.append({
-                                    "apartado": apartado,
-                                    "variables": variables_con_valores
-                                })
-                    except Exception as e:
-                        print(f"Error al obtener datos de biológicos para CLUES {clues}: {str(e)}")
-                    
-                    return biologicos_data
-
-                datos_biologicos = obtener_datos_biologicos(clues)
-
-                # Construir respuesta para esta CLUES
-                resultado_clues = {
-                    "clues": clues,
-                    "unidad": geo_data,
-                    "biologicos": datos_biologicos
-                }
-
-                resultados.append(resultado_clues)
-
-            except Exception as e:
-                print(f"Error procesando CLUES {clues}: {str(e)}")
-                resultados.append({
-                    "clues": clues,
-                    "error": str(e)
-                })
-
-        # Identificar variables no encontradas
-        variables_encontradas = set()
-        for resultado in resultados:
-            if "biologicos" in resultado:
-                for grupo in resultado["biologicos"]:
-                    for variable in grupo["variables"]:
-                        variables_encontradas.add(variable["variable"].upper())
-        
-        variables_no_encontradas = [v for v in variables_list if v.upper() not in variables_encontradas]
-
-        # Construir respuesta final
-        respuesta = {
-            "catalogo": catalogo,
-            "cubo": cubo,
-            "resultados": resultados,
-            "clues_no_encontradas": clues_no_encontradas,
-            "variables_no_encontradas": variables_no_encontradas,
-            "metadata": {
-                "fecha_consulta": pd.Timestamp.now().isoformat(),
-                "version": "1.0",
-                "total_clues_solicitadas": len(clues_list),
-                "total_clues_procesadas": len(resultados),
-                "total_clues_no_encontradas": len(clues_no_encontradas),
-                "variables_solicitadas": variables_list,
-                "total_variables_solicitadas": len(variables_list),
-                "variables_encontradas": len(variables_list) - len(variables_no_encontradas),
-                "variables_no_encontradas_count": len(variables_no_encontradas)
-            }
-        }
-
-        return respuesta
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": str(e),
-                "detalle": "Error interno al procesar la solicitud",
-                "catalogo": catalogo,
-                "cubo": cubo,
-                "clues_solicitadas": clues_list,
-                "variables_solicitadas": variables_list
-            }
-        )
-
