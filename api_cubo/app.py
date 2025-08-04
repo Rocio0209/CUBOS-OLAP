@@ -501,7 +501,7 @@ def biologicos_por_multiples_clues(
         ruta_archivo = os.path.join(os.path.dirname(__file__), "../database/seeders/json/unidades.json")
         with open(ruta_archivo, "r", encoding="utf-8") as f:
             unidades_medicas = json.load(f)
-        unidades_dict = {um["clues"]: um for um in unidades_medicas}  # Diccionario para búsqueda rápida
+        unidades_dict = {um["clues"]: um for um in unidades_medicas}
 
         # 2. Configuración inicial del cubo OLAP
         cubo_mdx = f'[{cubo}]'
@@ -529,61 +529,31 @@ def biologicos_por_multiples_clues(
                     clues_no_encontradas.append(clues)
                     continue
 
-                # 4. Obtener datos geográficos (incluyendo nombre desde JSON)
+                # 4. Obtener datos geográficos
                 def obtener_datos_geograficos(clues: str) -> dict:
                     """Obtiene los datos geográficos combinando OLAP y JSON local"""
                     geo_data = {
                         "entidad": None,
                         "jurisdiccion": None,
                         "municipio": None,
-                        "nombre": None  # Nuevo campo para el nombre desde JSON
+                        "nombre": None
                     }
 
-                    # A. Obtener nombre desde JSON local
                     unidad_info = unidades_dict.get(clues)
                     if unidad_info:
                         geo_data["nombre"] = unidad_info.get("nombre", None)
 
-                    # Consultas individuales por dimensión para evitar error MDX
                     geo_data["entidad"] = obtener_valor_dim(cadena_conexion, cubo_mdx, "Entidad", clues)
                     geo_data["jurisdiccion"] = obtener_valor_dim(cadena_conexion, cubo_mdx, "Jurisdicción", clues)
                     geo_data["municipio"] = obtener_valor_dim(cadena_conexion, cubo_mdx, "Municipio", clues)
-
-                    # B. Obtener datos geográficos desde OLAP
-                    try:
-                        mdx_geo = f"""
-                        SELECT
-                        NON EMPTY {{
-                            [Entidad].[Entidad].CurrentMember,
-                            [Jurisdicción].[Jurisdicción].CurrentMember,
-                            [Municipio].[Municipio].CurrentMember
-                        }} ON ROWS,
-                        {{ [Measures].DefaultMember }} ON COLUMNS
-                        FROM {cubo_mdx}
-                        WHERE ([CLUES].[CLUES].&[{clues}])
-                        """
-                        
-                        df_geo = query_olap(cadena_conexion, mdx_geo)
-                        if not df_geo.empty:
-                            for i, row in df_geo.iterrows():
-                                cell_value = str(row[0]) if pd.notna(row[0]) else None
-                                if cell_value:
-                                    if "[Entidad].[Entidad]" in cell_value:
-                                        geo_data["entidad"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                    elif "[Jurisdicción].[Jurisdicción]" in cell_value:
-                                        geo_data["jurisdiccion"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                                    elif "[Municipio].[Municipio]" in cell_value:
-                                        geo_data["municipio"] = cell_value.split("].[")[-1].replace("]", "").strip()
-                    except Exception as geo_error:
-                        print(f"Error en consulta geográfica para CLUES {clues}: {str(geo_error)}")
 
                     return geo_data
 
                 geo_data = obtener_datos_geograficos(clues)
 
-                # 5. Obtener datos de biológicos (código original sin cambios)
+                # 5. Obtener datos de biológicos con consolidación de migrantes
                 def obtener_datos_biologicos(clues: str) -> list:
-                    """Obtiene los datos de aplicación de biológicos"""
+                    """Obtiene los datos de aplicación de biológicos consolidando migrantes"""
                     biologicos_data = []
                     
                     try:
@@ -601,10 +571,10 @@ def biologicos_por_multiples_clues(
                         apartados_biologicos = []
                         for _, row in df_apartados.iterrows():
                             if row[0] and 'BIOLÓGICOS' in row[0].upper():
-                                apartado = row[0].split('.')[-1].replace('[', '').replace(']', '')
+                                apartado = row[0].split('].[')[-1].replace(']', '').strip()
                                 apartados_biologicos.append(apartado)
                         
-                        # Para cada apartado de biológicos, obtener sus variables
+                        # Procesar cada apartado
                         for apartado in apartados_biologicos:
                             mdx_variables = f"""
                             SELECT
@@ -616,26 +586,52 @@ def biologicos_por_multiples_clues(
                             
                             df_variables = query_olap(cadena_conexion, mdx_variables)
                             
-                            variables_con_valores = []
+                            variables_normales = []
+                            total_migrantes = 0
+                            tiene_migrantes = False
+                            
                             for _, row in df_variables.iterrows():
                                 if len(row) >= 2 and row[0] and pd.notna(row[1]):
-                                    nombre_variable = row[0].split('.')[-1].replace('[', '').replace(']', '')
+                                    # Extraer nombre completo
+                                    full_variable_name = row[0]
+                                    if '].&[' in full_variable_name:
+                                        full_variable_name = full_variable_name.split('].&[')[-1].rstrip(']')
+                                    elif '].[' in full_variable_name:
+                                        full_variable_name = full_variable_name.split('].[')[-1].rstrip(']')
+                                    else:
+                                        full_variable_name = full_variable_name.strip('[]')
+                                    
                                     try:
                                         valor = int(float(row[1])) if pd.notna(row[1]) else None
                                     except:
                                         valor = None
                                     
                                     if valor is not None:
-                                        variables_con_valores.append({
-                                            "variable": nombre_variable,
-                                            "total": valor
-                                        })
-
-                            if variables_con_valores:
-                                biologicos_data.append({
-                                    "apartado": apartado,
-                                    "variables": variables_con_valores
+                                        # Verificar si es variable de migrante
+                                        if 'MIGRANTE' in full_variable_name.upper():
+                                            total_migrantes += valor
+                                            tiene_migrantes = True
+                                        else:
+                                            variables_normales.append({
+                                                "variable": full_variable_name,
+                                                "total": valor
+                                            })
+                            
+                            # Construir estructura de resultado para el apartado
+                            apartado_data = {
+                                "apartado": apartado,
+                                "variables": variables_normales
+                            }
+                            
+                            # Agregar total consolidado de migrantes si existe
+                            if tiene_migrantes:
+                                apartado_data["variables"].append({
+                                    "variable": f"TOTAL DE VACUNAS APLICADAS A MIGRANTES - {apartado}",
+                                    "total": total_migrantes
                                 })
+                            
+                            biologicos_data.append(apartado_data)
+                            
                     except Exception as e:
                         print(f"Error al obtener datos de biológicos para CLUES {clues}: {str(e)}")
                     
@@ -643,10 +639,10 @@ def biologicos_por_multiples_clues(
 
                 datos_biologicos = obtener_datos_biologicos(clues)
 
-                # 6. Construir respuesta incluyendo el nombre desde JSON
+                # 6. Construir respuesta
                 resultado_clues = {
                     "clues": clues,
-                    "unidad": geo_data,  # Ahora incluye "nombre"
+                    "unidad": geo_data,
                     "biologicos": datos_biologicos
                 }
 
@@ -657,7 +653,7 @@ def biologicos_por_multiples_clues(
                 resultados.append({
                     "clues": clues,
                     "error": str(e),
-                    "unidad": {  # Estructura mínima en caso de error
+                    "unidad": {
                         "nombre": None,
                         "entidad": None,
                         "jurisdiccion": None,
@@ -674,10 +670,11 @@ def biologicos_por_multiples_clues(
             "clues_no_encontradas": clues_no_encontradas,
             "metadata": {
                 "fecha_consulta": pd.Timestamp.now().isoformat(),
-                "version": "1.0",
+                "version": "1.2",
                 "total_clues_solicitadas": len(clues_list),
                 "total_clues_procesadas": len(resultados),
-                "total_clues_no_encontradas": len(clues_no_encontradas)
+                "total_clues_no_encontradas": len(clues_no_encontradas),
+                "nota": "Variables con 'MIGRANTE' se consolidan en un total por apartado"
             }
         }
 
