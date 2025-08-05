@@ -13,8 +13,12 @@ from typing import List, Optional
 from pydantic import BaseModel
 from fastapi import Body
 
-import json
+from fastapi import HTTPException
+from openpyxl import load_workbook
+import io
 import os
+import json
+
 
 
 app = FastAPI()
@@ -490,6 +494,7 @@ def biologicos_por_clues(catalogo: str, cubo: str, clues: str):
 #biologicos_por_multiples_clues
 # 
 
+
 @app.post("/biologicos_por_multiples_clues")
 def biologicos_por_multiples_clues(
     catalogo: str = Body(...),
@@ -691,5 +696,256 @@ def biologicos_por_multiples_clues(
                 "catalogo": catalogo,
                 "cubo": cubo,
                 "clues_solicitadas": clues_list
+            }
+        )
+
+
+@app.get("/todas_clues_hg_completo")
+def obtener_todas_clues_hg_completo(
+    catalogo: str = Query(..., description="Nombre del catálogo OLAP"),
+    cubo: str = Query(..., description="Nombre del cubo OLAP"),
+    incluir_biologicos: bool = Query(True, description="Incluir datos de biológicos")
+):
+    try:
+        # 1. Cargar el JSON de unidades médicas al inicio
+        ruta_archivo = os.path.join(os.path.dirname(__file__), "../database/seeders/json/unidades.json")
+        with open(ruta_archivo, "r", encoding="utf-8") as f:
+            unidades_medicas = json.load(f)
+        
+        # Filtrar solo las CLUES que empiezan con HG
+        clues_hg = [um["clues"] for um in unidades_medicas if um["clues"].startswith("HG")]
+        unidades_dict = {um["clues"]: um for um in unidades_medicas if um["clues"].startswith("HG")}
+
+        # 2. Configuración inicial del cubo OLAP
+        cubo_mdx = f'[{cubo}]'
+        cadena_conexion = (
+            "Provider=MSOLAP.8;"
+            "Data Source=pwidgis03.salud.gob.mx;"
+            "User ID=SALUD\\DGIS15;"
+            "Password=Temp123!;"
+            f"Initial Catalog={catalogo};"
+        )
+
+        resultados = []
+        clues_no_encontradas = []
+        
+        for clues in clues_hg:
+            try:
+                # 3. Verificar que la CLUES existe en OLAP
+                mdx_check = f"""
+                SELECT {{[Measures].DefaultMember}} ON COLUMNS
+                FROM {cubo_mdx}
+                WHERE ([CLUES].[CLUES].&[{clues}])
+                """
+                check_df = query_olap(cadena_conexion, mdx_check)
+                if check_df.empty:
+                    clues_no_encontradas.append(clues)
+                    continue
+
+                # 4. Obtener datos geográficos completos
+                def obtener_datos_geograficos(clues: str) -> dict:
+                    """Obtiene todos los datos geográficos disponibles"""
+                    geo_data = {
+                        "clues": clues,
+                        "nombre": None,
+                        "tipo_unidad": None,
+                        "entidad": None,
+                        "jurisdiccion": None,
+                        "municipio": None,
+                        "localidad": None,
+                        "domicilio": None,
+                        "codigo_postal": None,
+                        "estatus": None
+                    }
+
+                    unidad_info = unidades_dict.get(clues, {})
+                    for key in geo_data.keys():
+                        if key in unidad_info:
+                            geo_data[key] = unidad_info[key]
+
+                    # Complementar con datos de OLAP
+                    geo_data["entidad"] = obtener_valor_dim(cadena_conexion, cubo_mdx, "Entidad", clues)
+                    geo_data["jurisdiccion"] = obtener_valor_dim(cadena_conexion, cubo_mdx, "Jurisdicción", clues)
+                    geo_data["municipio"] = obtener_valor_dim(cadena_conexion, cubo_mdx, "Municipio", clues)
+
+                    return geo_data
+
+                geo_data = obtener_datos_geograficos(clues)
+
+                # 5. Obtener TODAS las variables y medidas disponibles
+                def obtener_todas_variables(clues: str) -> dict:
+                    """Obtiene todas las variables y medidas para la CLUES"""
+                    todas_variables = {}
+                    
+                    # Obtener todos los apartados
+                    mdx_apartados = f"""
+                    SELECT
+                    NON EMPTY {{ [Apartado].[Apartado].MEMBERS }} ON ROWS,
+                    {{ [Measures].DefaultMember }} ON COLUMNS
+                    FROM {cubo_mdx}
+                    WHERE ([CLUES].[CLUES].&[{clues}])
+                    """
+                    
+                    df_apartados = query_olap(cadena_conexion, mdx_apartados)
+                    
+                    for _, row in df_apartados.iterrows():
+                        if row[0]:
+                            apartado = row[0].split('].[')[-1].replace(']', '').strip()
+                            
+                            # Obtener variables para este apartado
+                            mdx_variables = f"""
+                            SELECT
+                            NON EMPTY {{ [Variable].[Variable].MEMBERS }} ON ROWS,
+                            {{ [Measures].[Total] }} ON COLUMNS
+                            FROM {cubo_mdx}
+                            WHERE ([Apartado].[Apartado].&[{apartado}], [CLUES].[CLUES].&[{clues}])
+                            """
+                            
+                            df_variables = query_olap(cadena_conexion, mdx_variables)
+                            
+                            variables_apartado = []
+                            for _, var_row in df_variables.iterrows():
+                                if len(var_row) >= 2 and var_row[0]:
+                                    variable = var_row[0].split('].[')[-1].replace(']', '').strip()
+                                    valor = var_row[1] if pd.notna(var_row[1]) else None
+                                    
+                                    variables_apartado.append({
+                                        "variable": variable,
+                                        "valor": valor
+                                    })
+                            
+                            todas_variables[apartado] = variables_apartado
+                    
+                    return todas_variables
+
+                # 6. Obtener datos de biológicos (si se solicita)
+                datos_biologicos = []
+                if incluir_biologicos:
+                    def obtener_datos_biologicos(clues: str) -> list:
+                        """Obtiene los datos de biológicos consolidando migrantes"""
+                        biologicos_data = []
+                        
+                        mdx_apartados_biologicos = f"""
+                        SELECT
+                        NON EMPTY {{ [Apartado].[Apartado].MEMBERS }} ON ROWS,
+                        {{ [Measures].DefaultMember }} ON COLUMNS
+                        FROM {cubo_mdx}
+                        WHERE ([CLUES].[CLUES].&[{clues}])
+                        """
+                        
+                        df_apartados = query_olap(cadena_conexion, mdx_apartados_biologicos)
+                        
+                        apartados_biologicos = []
+                        for _, row in df_apartados.iterrows():
+                            if row[0] and 'BIOLÓGICOS' in row[0].upper():
+                                apartado = row[0].split('].[')[-1].replace(']', '').strip()
+                                apartados_biologicos.append(apartado)
+                        
+                        for apartado in apartados_biologicos:
+                            mdx_variables = f"""
+                            SELECT
+                            NON EMPTY {{ [Variable].[Variable].MEMBERS }} ON ROWS,
+                            {{ [Measures].[Total] }} ON COLUMNS
+                            FROM {cubo_mdx}
+                            WHERE ([Apartado].[Apartado].&[{apartado}], [CLUES].[CLUES].&[{clues}])
+                            """
+                            
+                            df_variables = query_olap(cadena_conexion, mdx_variables)
+                            
+                            variables_normales = []
+                            total_migrantes = 0
+                            tiene_migrantes = False
+                            
+                            for _, row in df_variables.iterrows():
+                                if len(row) >= 2 and row[0] and pd.notna(row[1]):
+                                    full_variable_name = row[0].split('].[')[-1].replace(']', '').strip()
+                                    try:
+                                        valor = int(float(row[1])) if pd.notna(row[1]) else None
+                                    except:
+                                        valor = None
+                                    
+                                    if valor is not None:
+                                        if 'MIGRANTE' in full_variable_name.upper():
+                                            total_migrantes += valor
+                                            tiene_migrantes = True
+                                        else:
+                                            variables_normales.append({
+                                                "variable": full_variable_name,
+                                                "total": valor
+                                            })
+                            
+                            apartado_data = {
+                                "apartado": apartado,
+                                "variables": variables_normales
+                            }
+                            
+                            if tiene_migrantes:
+                                apartado_data["variables"].append({
+                                    "variable": f"TOTAL DE VACUNAS APLICADAS A MIGRANTES - {apartado}",
+                                    "total": total_migrantes
+                                })
+                            
+                            biologicos_data.append(apartado_data)
+                        
+                        return biologicos_data
+
+                    datos_biologicos = obtener_datos_biologicos(clues)
+
+                # 7. Construir respuesta completa
+                resultado_clues = {
+                    "clues": clues,
+                    "datos_generales": geo_data,
+                    "todas_variables": obtener_todas_variables(clues),
+                    "biologicos": datos_biologicos if incluir_biologicos else None
+                }
+
+                resultados.append(resultado_clues)
+
+            except Exception as e:
+                print(f"Error procesando CLUES {clues}: {str(e)}")
+                resultados.append({
+                    "clues": clues,
+                    "error": str(e),
+                    "datos_generales": {
+                        "clues": clues,
+                        "nombre": None,
+                        "tipo_unidad": None,
+                        "entidad": None,
+                        "jurisdiccion": None,
+                        "municipio": None
+                    },
+                    "todas_variables": None,
+                    "biologicos": None
+                })
+
+        # Construir respuesta final
+        respuesta = {
+            "catalogo": catalogo,
+            "cubo": cubo,
+            "total_clues_hg": len(clues_hg),
+            "clues_procesadas": len(resultados),
+            "clues_no_encontradas": clues_no_encontradas,
+            "resultados": resultados,
+            "metadata": {
+                "fecha_consulta": pd.Timestamp.now().isoformat(),
+                "version": "2.0",
+                "incluye_biologicos": incluir_biologicos,
+                "filtro": "CLUES que comienzan con HG",
+                "notas": "Las variables de migrantes se consolidan en un total por apartado cuando se incluyen biológicos"
+            }
+        }
+
+        return respuesta
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": str(e),
+                "detalle": "Error interno al procesar la solicitud",
+                "catalogo": catalogo,
+                "cubo": cubo
             }
         )

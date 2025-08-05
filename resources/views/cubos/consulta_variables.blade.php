@@ -31,7 +31,7 @@
 
     <div class="mb-3">
         <button class="btn btn-primary mb-2" onclick="consultarBiologicos()" id="btnConsultar" disabled>Consultar Biológicos</button>
-        <button class="btn btn-success mb-2 ms-2" onclick="exportarExcel()" id="btnExportar" disabled>Exportar a Excel</button>
+        <!-- <button class="btn btn-success mb-2 ms-2" onclick="exportarExcel()" id="btnExportar" disabled>Exportar a Excel</button> -->
     </div>
 
     <div id="spinnerCarga" class="text-center my-4 d-none">
@@ -127,7 +127,7 @@ function resetearFormulario() {
     $('#cluesSelect').val(null).trigger('change').prop('disabled', true);
     $('#btnCargarClues').prop('disabled', true);
     $('#btnConsultar').prop('disabled', true);
-    $('#btnExportar').prop('disabled', true);
+    // $('#btnExportar').prop('disabled', true);
     document.getElementById('mensajeCluesCargadas').classList.add('d-none');
     document.getElementById('resultadosContainer').classList.add('d-none');
 }
@@ -368,87 +368,87 @@ function mostrarResultadosBiologicos(data) {
     $('#btnExportar').prop('disabled', false);
 }
 
-function exportarExcel() {
-    if (!resultadosConsulta || resultadosConsulta.length === 0) {
-        alert("No hay datos para exportar.");
-        return;
-    }
+// function exportarExcel() {
+//     if (!resultadosConsulta || resultadosConsulta.length === 0) {
+//         alert("No hay datos para exportar.");
+//         return;
+//     }
 
-    // Preparar datos para exportación
-    const datosExport = [];
-    const todasVariables = {};
-    const apartados = {};
+//     // Preparar datos para exportación
+//     const datosExport = [];
+//     const todasVariables = {};
+//     const apartados = {};
 
-    // Recopilar todas las variables y sus apartados
-    resultadosConsulta.forEach(resultado => {
-        if (resultado.biologicos) {
-            resultado.biologicos.forEach(apartado => {
-                if (!apartados[apartado.apartado]) {
-                    apartados[apartado.apartado] = new Set();
-                }
-                apartado.variables.forEach(variable => {
-                    todasVariables[variable.variable] = apartado.apartado;
-                    apartados[apartado.apartado].add(variable.variable);
-                });
-            });
-        }
-    });
+//     // Recopilar todas las variables y sus apartados
+//     resultadosConsulta.forEach(resultado => {
+//         if (resultado.biologicos) {
+//             resultado.biologicos.forEach(apartado => {
+//                 if (!apartados[apartado.apartado]) {
+//                     apartados[apartado.apartado] = new Set();
+//                 }
+//                 apartado.variables.forEach(variable => {
+//                     todasVariables[variable.variable] = apartado.apartado;
+//                     apartados[apartado.apartado].add(variable.variable);
+//                 });
+//             });
+//         }
+//     });
 
-    // Crear estructura de datos para exportación
-    resultadosConsulta.forEach(resultado => {
-        const fila = {
-            CLUES: resultado.clues,
-            Entidad: resultado.unidad?.entidad || '',
-            Jurisdicción: resultado.unidad?.jurisdiccion || '',
-            Municipio: resultado.unidad?.municipio || '',
-            'Unidad Médica': resultado.unidad?.nombre || ''
-        };
+//     // Crear estructura de datos para exportación
+//     resultadosConsulta.forEach(resultado => {
+//         const fila = {
+//             CLUES: resultado.clues,
+//             Entidad: resultado.unidad?.entidad || '',
+//             Jurisdicción: resultado.unidad?.jurisdiccion || '',
+//             Municipio: resultado.unidad?.municipio || '',
+//             'Unidad Médica': resultado.unidad?.nombre || ''
+//         };
 
-        // Inicializar todas las variables como vacías
-        Object.keys(todasVariables).forEach(variable => {
-            fila[variable] = '';
-        });
+//         // Inicializar todas las variables como vacías
+//         Object.keys(todasVariables).forEach(variable => {
+//             fila[variable] = '';
+//         });
 
-        // Llenar los valores reales
-        if (resultado.biologicos) {
-            resultado.biologicos.forEach(apartado => {
-                apartado.variables.forEach(variable => {
-                    fila[variable.variable] = variable.total;
-                });
-            });
-        }
+//         // Llenar los valores reales
+//         if (resultado.biologicos) {
+//             resultado.biologicos.forEach(apartado => {
+//                 apartado.variables.forEach(variable => {
+//                     fila[variable.variable] = variable.total;
+//                 });
+//             });
+//         }
 
-        datosExport.push(fila);
-    });
+//         datosExport.push(fila);
+//     });
 
-    // Agregar fila de totales
-    const totales = {
-        'Unidad Médica': 'TOTALES',
-        CLUES: '',
-        Entidad: '',
-        Jurisdicción: '',
-        Municipio: ''
-    };
+//     // Agregar fila de totales
+//     const totales = {
+//         'Unidad Médica': 'TOTALES',
+//         CLUES: '',
+//         Entidad: '',
+//         Jurisdicción: '',
+//         Municipio: ''
+//     };
 
-    Object.keys(todasVariables).forEach(variable => {
-        totales[variable] = datosExport.reduce((sum, row) => sum + (row[variable] || 0), 0);
-    });
+//     Object.keys(todasVariables).forEach(variable => {
+//         totales[variable] = datosExport.reduce((sum, row) => sum + (row[variable] || 0), 0);
+//     });
 
-    datosExport.push(totales);
+//     datosExport.push(totales);
 
-    // Crear hoja de cálculo
-    const worksheet = XLSX.utils.json_to_sheet(datosExport);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Biológicos por CLUES");
+//     // Crear hoja de cálculo
+//     const worksheet = XLSX.utils.json_to_sheet(datosExport);
+//     const workbook = XLSX.utils.book_new();
+//     XLSX.utils.book_append_sheet(workbook, worksheet, "Biológicos por CLUES");
 
-    // Aplicar estilos a los encabezados
-    if (!workbook.SSF) {
-        workbook.SSF = {};
-    }
+//     // Aplicar estilos a los encabezados
+//     if (!workbook.SSF) {
+//         workbook.SSF = {};
+//     }
 
-    // Escribir el archivo
-    XLSX.writeFile(workbook, "biologicos_por_clues.xlsx");
-}
+//     // Escribir el archivo
+//     XLSX.writeFile(workbook, "biologicos_por_clues.xlsx");
+// }
 
 function mostrarSpinner() {
     document.getElementById('spinnerCarga').classList.remove('d-none');
