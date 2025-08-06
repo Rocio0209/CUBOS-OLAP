@@ -1039,13 +1039,24 @@ def biologicos_normalizados_con_migrantes(
                     ]
 
                     
-                    variables_finales.append({
+                    # Filtrar solo las variables normales (sin "MIGRANTES")
+                    variables_normales = [
+                        {"variable": var, "total": valores.get(var, 0)}
+                        for var in variables
+                        if 'MIGRANTE' not in var.upper()
+                    ]
+
+                    # Ordenar solo las variables normales
+                    variables_normales.sort(key=lambda v: extraer_edad_inicial(v["variable"]))
+
+                    # Agregar el total de migrantes al final
+                    variables_normales.append({
                         "variable": f"TOTAL DE VACUNAS APLICADAS A MIGRANTES - {apartado}",
                         "total": total_migrantes
                     })
 
-                                        # Ordenar variables por edad
-                    variables_finales.sort(key=lambda v: extraer_edad_inicial(v["variable"]))
+                    # Reemplazar variables_finales con la lista ordenada + total
+                    variables_finales = variables_normales
 
                     biologicos_data.append({
                         "apartado": apartado,
