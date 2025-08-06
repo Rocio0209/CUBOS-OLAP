@@ -31,7 +31,7 @@
 
     <div class="mb-3">
         <button class="btn btn-primary mb-2" onclick="consultarBiologicos()" id="btnConsultar" disabled>Consultar Biológicos</button>
-        <!-- <button class="btn btn-success mb-2 ms-2" onclick="exportarExcel()" id="btnExportar" disabled>Exportar a Excel</button> -->
+        <button class="btn btn-success mb-2 ms-2" onclick="exportarExcel()" id="btnExportar" disabled>Exportar a Excel</button>
     </div>
 
     <div id="spinnerCarga" class="text-center my-4 d-none">
@@ -122,6 +122,69 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 });
+
+function exportarExcel() {
+    if (!resultadosConsulta || resultadosConsulta.length === 0) {
+        alert("No hay datos para exportar.");
+        return;
+    }
+
+    const workbook = XLSX.utils.book_new();
+    const rows = [];
+
+    // Encabezado
+    const headers = ["CLUES", "Unidad Médica", "Entidad", "Jurisdicción", "Municipio"];
+    const apartados = {};
+    const variables = [];
+
+    resultadosConsulta.forEach(res => {
+        res.biologicos?.forEach(apartado => {
+            apartado.variables.forEach(v => {
+                const key = `${apartado.apartado} - ${v.variable}`;
+                if (!variables.includes(key)) {
+                    variables.push(key);
+                    apartados[key] = apartado.apartado;
+                }
+            });
+        });
+    });
+
+    headers.push(...variables);
+
+    rows.push(headers);
+
+    // Filas de datos
+    resultadosConsulta.forEach(res => {
+        const row = [
+            res.clues,
+            res.unidad?.nombre || "",
+            res.unidad?.entidad || "",
+            res.unidad?.jurisdiccion || "",
+            res.unidad?.municipio || ""
+        ];
+
+        const valores = {};
+        res.biologicos?.forEach(apartado => {
+            apartado.variables.forEach(v => {
+                const key = `${apartado.apartado} - ${v.variable}`;
+                valores[key] = v.total;
+            });
+        });
+
+        variables.forEach(v => {
+            row.push(valores[v] || "");
+        });
+
+        rows.push(row);
+    });
+
+    const worksheet = XLSX.utils.aoa_to_sheet(rows);
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Biológicos");
+
+    // Descargar archivo
+    const fecha = new Date().toISOString().split("T")[0];
+    XLSX.writeFile(workbook, `biologicos_${fecha}.xlsx`);
+}
 
 function resetearFormulario() {
     $('#cluesSelect').val(null).trigger('change').prop('disabled', true);
@@ -216,6 +279,7 @@ async function consultarBiologicos() {
 
         resultadosConsulta = data.resultados;
         mostrarResultadosBiologicos(data);
+        document.getElementById('btnExportar').disabled = false;
 
     } catch (error) {
         console.error("Error completo:", error);
@@ -276,10 +340,10 @@ function mostrarResultadosBiologicos(data) {
     data.resultados.forEach(resultado => {
         const clues = resultado.clues;
         datosPorClues[clues] = {
+            nombre: resultado.unidad?.nombre || '',
             entidad: resultado.unidad?.entidad || '',
             jurisdiccion: resultado.unidad?.jurisdiccion || '',
             municipio: resultado.unidad?.municipio || '',
-            nombre: resultado.unidad?.nombre || '',
             variables: {}
         };
 
@@ -302,10 +366,10 @@ function mostrarResultadosBiologicos(data) {
     // Generar encabezados de tabla
     tablaHeader.innerHTML = `
         <th rowspan="2">CLUES</th>
+        <th rowspan="2">Unidad Médica</th>
         <th rowspan="2">Entidad</th>
         <th rowspan="2">Jurisdicción</th>
         <th rowspan="2">Municipio</th>
-        <th rowspan="2">Unidad Médica</th>
     `;
 
     // Agrupar variables por apartado
@@ -332,10 +396,10 @@ function mostrarResultadosBiologicos(data) {
         const fila = document.createElement('tr');
         fila.innerHTML = `
             <td>${clues}</td>
+            <td>${datos.nombre}</td>
             <td>${datos.entidad}</td>
             <td>${datos.jurisdiccion}</td>
             <td>${datos.municipio}</td>
-            <td>${datos.nombre}</td>
         `;
 
         // Agregar valores de variables agrupadas por apartado
