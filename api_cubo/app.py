@@ -12,7 +12,7 @@ from urllib.parse import unquote  # Importación necesaria para decodificar URLs
 from typing import List, Optional
 from pydantic import BaseModel
 from fastapi import Body
-
+import re
 from fastapi import HTTPException
 from openpyxl import load_workbook
 import io
@@ -109,6 +109,53 @@ def sanitize_result(data):
         return {k: sanitize_result(v) for k, v in data.items()}
     return data
 
+
+import re
+
+def extraer_edad_inicial(nombre_variable: str) -> int:
+    """
+    Extrae la edad inicial en días para ordenar correctamente.
+    Soporta:
+    - "RECIÉN NACIDO" → 0
+    - "24 HORAS" → 0
+    - "2 A 28 DÍAS" → 2
+    - "1 A 4 AÑOS" → 365
+    - "5 A 13 AÑOS" → 1825
+    """
+    nombre = nombre_variable.upper()
+
+    # Recién nacido o 24 horas → 0 días
+    if "RECIÉN NACIDO" in nombre or "24 HORAS" in nombre:
+        return 0
+
+    # Días
+    match = re.search(r"(\d+)\s*A\s*(\d+)\s*D[IÍ]AS?", nombre)
+    if match:
+        return int(match.group(1))
+
+    # Meses
+    match = re.search(r"(\d+)\s*A\s*(\d+)\s*MESES?", nombre)
+    if match:
+        return int(match.group(1)) * 30
+
+    # Años
+    match = re.search(r"(\d+)\s*A\s*(\d+)\s*A[NÑ]OS?", nombre)
+    if match:
+        return int(match.group(1)) * 365
+
+    # Único valor (ej. "2 MESES" o "1 AÑO")
+    match = re.search(r"(\d+)\s*(D[IÍ]AS?|MESES?|A[NÑ]OS?)", nombre)
+    if match:
+        valor = int(match.group(1))
+        unidad = match.group(2)
+        if "DÍA" in unidad or "DIA" in unidad:
+            return valor
+        elif "MES" in unidad:
+            return valor * 30
+        elif "AÑO" in unidad:
+            return valor * 365
+
+    return 9999  # Variables sin edad clara al final
 
 @app.get("/cubos_disponibles")
 def cubos_disponibles():
@@ -996,6 +1043,9 @@ def biologicos_normalizados_con_migrantes(
                         "variable": f"TOTAL DE VACUNAS APLICADAS A MIGRANTES - {apartado}",
                         "total": total_migrantes
                     })
+
+                                        # Ordenar variables por edad
+                    variables_finales.sort(key=lambda v: extraer_edad_inicial(v["variable"]))
 
                     biologicos_data.append({
                         "apartado": apartado,
