@@ -172,8 +172,9 @@ function exportarExcel() {
         });
 
         variables.forEach(v => {
-            row.push(valores[v] || "");
-        });
+        const valor = valores[v];
+        row.push(typeof valor === "number" ? valor : 0);
+    });
 
         rows.push(row);
     });
@@ -190,7 +191,7 @@ function resetearFormulario() {
     $('#cluesSelect').val(null).trigger('change').prop('disabled', true);
     $('#btnCargarClues').prop('disabled', true);
     $('#btnConsultar').prop('disabled', true);
-    // $('#btnExportar').prop('disabled', true);
+    $('#btnExportar').prop('disabled', true);
     document.getElementById('mensajeCluesCargadas').classList.add('d-none');
     document.getElementById('resultadosContainer').classList.add('d-none');
 }
@@ -405,7 +406,7 @@ function mostrarResultadosBiologicos(data) {
         // Agregar valores de variables agrupadas por apartado
         Object.values(apartados).forEach(variables => {
             variables.forEach(variable => {
-                fila.innerHTML += `<td>${datos.variables[variable] || ''}</td>`;
+                fila.innerHTML += `<td>${datos.variables[variable] || '0'}</td>`;
             });
         });
 

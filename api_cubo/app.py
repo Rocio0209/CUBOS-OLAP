@@ -702,3 +702,169 @@ def biologicos_por_multiples_clues(
 
 
     
+
+#######################################################
+# variables con cero
+#######################################################
+@app.post("/biologicos_normalizados")
+def biologicos_normalizados(
+    catalogo: str = Body(...),
+    cubo: str = Body(...),
+    clues_list: List[str] = Body(...)
+):
+    try:
+        # 1. Cargar JSON de unidades médicas
+        ruta_archivo = os.path.join(os.path.dirname(__file__), "../database/seeders/json/unidades.json")
+        with open(ruta_archivo, "r", encoding="utf-8") as f:
+            unidades_medicas = json.load(f)
+        unidades_dict = {um["clues"]: um for um in unidades_medicas}
+
+        # 2. Configuración OLAP
+        cubo_mdx = f'[{cubo}]'
+        cadena_conexion = (
+            "Provider=MSOLAP.8;"
+            "Data Source=pwidgis03.salud.gob.mx;"
+            "User ID=SALUD\\DGIS15;"
+            "Password=Temp123!;"
+            f"Initial Catalog={catalogo};"
+        )
+
+        resultados = []
+        clues_no_encontradas = []
+
+        # 3. Obtener TODAS las variables posibles (una sola vez)
+        mdx_apartados = f"""
+        SELECT
+        NON EMPTY {{ [Apartado].[Apartado].MEMBERS }} ON ROWS,
+        {{ [Measures].DefaultMember }} ON COLUMNS
+        FROM {cubo_mdx}
+        """
+        df_apartados = query_olap(cadena_conexion, mdx_apartados)
+
+        todas_las_variables = {}
+        for _, row in df_apartados.iterrows():
+            if row[0] and 'BIOLÓGICOS' in row[0].upper():
+                apartado = row[0].split('].[')[-1].replace(']', '').strip()
+                mdx_vars = f"""
+                SELECT
+                NON EMPTY {{ [Variable].[Variable].MEMBERS }} ON ROWS,
+                {{ [Measures].[Total] }} ON COLUMNS
+                FROM {cubo_mdx}
+                WHERE ([Apartado].[Apartado].&[{apartado}])
+                """
+                df_vars = query_olap(cadena_conexion, mdx_vars)
+                variables = []
+                for _, vrow in df_vars.iterrows():
+                    var_name = vrow[0]
+                    if '].&[' in var_name:
+                        var_name = var_name.split('].&[')[-1].rstrip(']')
+                    elif '].[' in var_name:
+                        var_name = var_name.split('].[')[-1].rstrip(']')
+                    else:
+                        var_name = var_name.strip('[]')
+                    variables.append(var_name)
+                todas_las_variables[apartado] = variables
+
+        # 4. Procesar cada CLUES
+        for clues in clues_list:
+            try:
+                mdx_check = f"""
+                SELECT {{[Measures].DefaultMember}} ON COLUMNS
+                FROM {cubo_mdx}
+                WHERE ([CLUES].[CLUES].&[{clues}])
+                """
+                check_df = query_olap(cadena_conexion, mdx_check)
+                if check_df.empty:
+                    clues_no_encontradas.append(clues)
+                    continue
+
+                geo_data = {
+                    "nombre": unidades_dict.get(clues, {}).get("nombre"),
+                    "entidad": obtener_valor_dim(cadena_conexion, cubo_mdx, "Entidad", clues),
+                    "jurisdiccion": obtener_valor_dim(cadena_conexion, cubo_mdx, "Jurisdicción", clues),
+                    "municipio": obtener_valor_dim(cadena_conexion, cubo_mdx, "Municipio", clues)
+                }
+
+                biologicos_data = []
+                for apartado, variables in todas_las_variables.items():
+                    valores = {}
+                    mdx_clues = f"""
+                    SELECT
+                    NON EMPTY {{ [Variable].[Variable].MEMBERS }} ON ROWS,
+                    {{ [Measures].[Total] }} ON COLUMNS
+                    FROM {cubo_mdx}
+                    WHERE ([Apartado].[Apartado].&[{apartado}], [CLUES].[CLUES].&[{clues}])
+                    """
+                    df_vars = query_olap(cadena_conexion, mdx_clues)
+
+                    for _, vrow in df_vars.iterrows():
+                        var_name = vrow[0]
+                        if '].&[' in var_name:
+                            var_name = var_name.split('].&[')[-1].rstrip(']')
+                        elif '].[' in var_name:
+                            var_name = var_name.split('].[')[-1].rstrip(']')
+                        else:
+                            var_name = var_name.strip('[]')
+                        try:
+                            valor = int(float(vrow[1])) if pd.notna(vrow[1]) else 0
+                        except:
+                            valor = 0
+                        valores[var_name] = valor
+
+                    variables_finales = [
+                        {"variable": var, "total": valores.get(var, 0)}
+                        for var in variables
+                    ]
+
+                    biologicos_data.append({
+                        "apartado": apartado,
+                        "variables": variables_finales
+                    })
+
+                resultados.append({
+                    "clues": clues,
+                    "unidad": geo_data,
+                    "biologicos": biologicos_data
+                })
+
+            except Exception as e:
+                resultados.append({
+                    "clues": clues,
+                    "error": str(e),
+                    "unidad": {
+                        "nombre": None,
+                        "entidad": None,
+                        "jurisdiccion": None,
+                        "municipio": None
+                    },
+                    "biologicos": []
+                })
+
+        return {
+            "catalogo": catalogo,
+            "cubo": cubo,
+            "resultados": resultados,
+            "clues_no_encontradas": clues_no_encontradas,
+            "metadata": {
+                "fecha_consulta": pd.Timestamp.now().isoformat(),
+                "version": "1.3",
+                "total_clues_solicitadas": len(clues_list),
+                "total_clues_procesadas": len(resultados),
+                "total_clues_no_encontradas": len(clues_no_encontradas),
+                "nota": "Todas las variables se normalizan con valor 0 si no están presentes"
+            }
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": str(e),
+                "detalle": "Error interno al procesar la solicitud",
+                "catalogo": catalogo,
+                "cubo": cubo,
+                "clues_solicitadas": clues_list
+            }
+        )
