@@ -259,7 +259,7 @@ async function consultarBiologicos() {
     document.getElementById('resultadosContainer').classList.add('d-none');
 
     try {
-        const response = await fetch(`${baseUrl}/biologicos_por_multiples_clues`, {
+        const response = await fetch(`${baseUrl}/biologicos_normalizados_con_migrantes2`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
