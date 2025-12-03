@@ -19,6 +19,9 @@
         <select id="cluesSelect" class="form-select" multiple disabled>
             <option value="">-- Primero selecciona un catálogo --</option>
         </select>
+        <button class="btn btn-warning mt-2" id="btnSeleccionarTodas" onclick="seleccionarTodasHG()" disabled>
+    Seleccionar todas las CLUES HG
+</button>
     </div>
 
     <div class="mb-3">
@@ -72,7 +75,7 @@
 
 @section('scripts')
 <script>
-const baseUrl = 'http://127.0.0.1:8070';
+const baseUrl = 'http://127.0.0.1:8080';
 let cuboActivo = null;
 let cluesDisponibles = [];
 let resultadosConsulta = [];
@@ -211,6 +214,7 @@ function cargarClues() {
     fetch(`${baseUrl}/miembros_jerarquia2?catalogo=${encodeURIComponent(catalogo)}&cubo=${encodeURIComponent(cuboActivo)}&jerarquia=CLUES`)
         .then(res => res.json())
         .then(data => {
+            console.log("RESPUESTA DE CLUES:", data);
             const select = $('#cluesSelect');
             select.empty();
             
@@ -233,6 +237,7 @@ function cargarClues() {
                 select.prop('disabled', false);
                 select.trigger('change');
                 
+                document.getElementById('btnSeleccionarTodas').disabled = false;
                 document.getElementById('mensajeCluesCargadas').classList.remove('d-none');
             } else {
                 alert("No se encontraron CLUES en este cubo.");
@@ -244,6 +249,18 @@ function cargarClues() {
             alert("Ocurrió un error al cargar las CLUES.");
         })
         .finally(() => ocultarSpinner());
+}
+function seleccionarTodasHG() {
+    if (cluesDisponibles.length === 0) {
+        alert("No hay CLUES cargadas.");
+        return;
+    }
+
+    // Seleccionar todas
+    $('#cluesSelect').val(cluesDisponibles).trigger('change');
+
+    // Habilitar consulta
+    $('#btnConsultar').prop('disabled', false);
 }
 
 async function consultarBiologicos() {

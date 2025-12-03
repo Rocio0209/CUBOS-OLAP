@@ -47,7 +47,7 @@
 
 @section('scripts')
 <script>
-const baseUrl = 'http://127.0.0.1:8070';
+const baseUrl = 'http://127.0.0.1:8080';
 let miembrosGlobal = [];
 let miembrosFiltrados = [];
 let paginaActual = 1;
